@@ -4,6 +4,7 @@ import type {
   DraftWorkspaceAttachment,
   Repo,
   ExecutorConfig,
+  ExecutorProfileId,
 } from 'shared/types';
 
 interface LinkedIssue {
@@ -35,6 +36,10 @@ export interface CreateModeContextValue {
   executorConfig: ExecutorConfig | null;
   /** Update executor config (triggers debounced scratch save) */
   setExecutorConfig: (config: ExecutorConfig | null) => void;
+  /** Additional agents to fan-out the same prompt to on submit (session-only, not persisted) */
+  additionalExecutors: ExecutorProfileId[];
+  /** Update the additional-agents list */
+  setAdditionalExecutors: (executors: ExecutorProfileId[]) => void;
   /** Uploaded attachments persisted in the draft */
   attachments: DraftWorkspaceAttachment[];
   /** Update draft attachments (triggers debounced scratch save) */

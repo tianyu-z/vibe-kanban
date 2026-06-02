@@ -3,7 +3,12 @@ import { CheckIcon, PaperclipIcon, XIcon } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { Checkbox } from './Checkbox';
 import { ChatBoxBase, VisualVariant, type DropzoneProps } from './ChatBoxBase';
-import { DropdownMenuItem, DropdownMenuLabel } from './Dropdown';
+import {
+  DropdownMenuCheckboxItem,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+} from './Dropdown';
 import { PrimaryButton } from './PrimaryButton';
 import type { LocalAttachmentMetadata } from './WorkspaceContext';
 import { ToolbarDropdown, ToolbarIconButton } from './Toolbar';
@@ -27,6 +32,10 @@ export interface ExecutorProps<TExecutor extends string = string> {
   selected: TExecutor | null;
   options: TExecutor[];
   onChange: (executor: TExecutor) => void;
+  /** Additional agents to fan-out the same prompt to (one new workspace per extra agent). */
+  additionalSelected?: TExecutor[];
+  /** Toggle an extra agent on/off. The primary agent is filtered out by the caller. */
+  onToggleAdditional?: (executor: TExecutor) => void;
 }
 
 export interface SaveAsDefaultProps {
@@ -136,8 +145,11 @@ export function CreateChatBox<TExecutor extends string = string>({
     e.target.value = '';
   };
 
+  const extraCount = executor.additionalSelected?.length ?? 0;
   const executorLabel = executor.selected
-    ? formatExecutorLabel(executor.selected)
+    ? extraCount > 0
+      ? `${formatExecutorLabel(executor.selected)} +${extraCount}`
+      : formatExecutorLabel(executor.selected)
     : emptyExecutorLabel;
 
   return (
@@ -173,6 +185,30 @@ export function CreateChatBox<TExecutor extends string = string>({
                 {formatExecutorLabel(exec)}
               </DropdownMenuItem>
             ))}
+            {executor.onToggleAdditional && executor.options.length > 1 && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel>Also run with</DropdownMenuLabel>
+                {executor.options
+                  .filter((exec) => exec !== executor.selected)
+                  .map((exec) => {
+                    const checked =
+                      executor.additionalSelected?.includes(exec) ?? false;
+                    return (
+                      <DropdownMenuCheckboxItem
+                        key={exec}
+                        checked={checked}
+                        onCheckedChange={() =>
+                          executor.onToggleAdditional?.(exec)
+                        }
+                        onSelect={(e) => e.preventDefault()}
+                      >
+                        {formatExecutorLabel(exec)}
+                      </DropdownMenuCheckboxItem>
+                    );
+                  })}
+              </>
+            )}
           </ToolbarDropdown>
           {saveAsDefault?.visible && (
             <label className="flex items-center gap-1.5 text-sm text-low cursor-pointer ml-2">

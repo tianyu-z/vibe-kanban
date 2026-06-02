@@ -14,7 +14,7 @@ import {
   toPrettyCase,
   splitMessageToTitleDescription,
 } from '@/shared/lib/string';
-import type { BaseCodingAgent, Repo } from 'shared/types';
+import type { BaseCodingAgent, ExecutorConfig, Repo } from 'shared/types';
 import { CreateChatBox } from '@vibe/ui/components/CreateChatBox';
 import { SettingsDialog } from '@/shared/dialogs/settings/SettingsDialog';
 import { CreateModeRepoPickerBar } from './CreateModeRepoPickerBar';
@@ -54,6 +54,8 @@ export function CreateChatBoxContainer({
     preferredExecutorConfig,
     executorConfig: draftConfig,
     setExecutorConfig: setDraftConfig,
+    additionalExecutors,
+    setAdditionalExecutors,
     attachments: draftAttachments,
     setAttachments: setDraftAttachments,
   } = useCreateMode();
@@ -61,6 +63,13 @@ export function CreateChatBoxContainer({
   const { createWorkspace } = useCreateWorkspace();
   const hasSelectedRepos = repos.length > 0;
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
+  // Drive submit-pending UI from local state: createWorkspace.isPending is a
+  // single-mutation observer that thrashes when we fan-out with N parallel
+  // mutateAsync calls.
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  // Aggregated error from a fan-out where ALL agents failed. Partial failures
+  // can't be surfaced here because we navigate away on first success.
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [hasInitializedStep, setHasInitializedStep] = useState(false);
   const [isSelectingRepos, setIsSelectingRepos] = useState(true);
 
@@ -109,7 +118,7 @@ export function CreateChatBoxContainer({
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    disabled: createWorkspace.isPending || !hasSelectedRepos,
+    disabled: isSubmitting || !hasSelectedRepos,
     noClick: true,
     noKeyboard: true,
   });
@@ -185,9 +194,17 @@ export function CreateChatBoxContainer({
     SettingsDialog.show({ initialSection: 'agents' });
   };
 
-  // Handle executor change - use saved variant if switching to default executor
+  // Handle executor change - use saved variant if switching to default executor.
+  // Also prune the new primary from the additional-agents list so we don't
+  // double-run the same agent.
   const handleExecutorChange = useCallback(
     (executor: BaseCodingAgent) => {
+      if (additionalExecutors.some((e) => e.executor === executor)) {
+        setAdditionalExecutors(
+          additionalExecutors.filter((e) => e.executor !== executor)
+        );
+      }
+
       const executorProfile = profiles?.[executor];
       if (!executorProfile) {
         setDraftConfig({ executor, variant: null });
@@ -217,58 +234,148 @@ export function CreateChatBoxContainer({
 
       setDraftConfig({ executor, variant: targetVariant });
     },
-    [profiles, setDraftConfig, config?.executor_profile]
+    [
+      profiles,
+      setDraftConfig,
+      config?.executor_profile,
+      additionalExecutors,
+      setAdditionalExecutors,
+    ]
   );
 
-  // Handle submit
+  const handleToggleAdditional = useCallback(
+    (executor: BaseCodingAgent) => {
+      if (executor === effectiveExecutor) return;
+      const exists = additionalExecutors.some((e) => e.executor === executor);
+      // variant: null today → resolved to 'DEFAULT' at submit. Stored as
+      // ExecutorProfileId (not BaseCodingAgent) so a future per-agent variant
+      // picker can populate it without a state-shape migration.
+      const next = exists
+        ? additionalExecutors.filter((e) => e.executor !== executor)
+        : [...additionalExecutors, { executor, variant: null }];
+      setAdditionalExecutors(next);
+    },
+    [additionalExecutors, effectiveExecutor, setAdditionalExecutors]
+  );
+
+  // Handle submit — fan-out to N agents (primary + additional), one workspace each.
+  // When only the primary is selected this is bit-identical to the original behavior
+  // (no name suffix, single create call).
   const handleSubmit = useCallback(async () => {
+    if (isSubmitting) return;
     setHasAttemptedSubmit(true);
+    setSubmitError(null);
     if (!canSubmit || !executorConfig) return;
 
     const { title } = splitMessageToTitleDescription(message);
-    const data = {
-      executor_config: executorConfig,
-      name: title,
-      prompt: message,
-      repos: repos.map((r) => ({
-        repo_id: r.id,
-        target_branch: targetBranches[r.id]!,
-      })),
-      linked_issue: linkedIssue
-        ? {
-            remote_project_id: linkedIssue.remoteProjectId,
-            issue_id: linkedIssue.issueId,
-          }
-        : null,
-      attachment_ids: getAttachmentIds(),
-    };
+
+    const agentList: ExecutorConfig[] = [
+      executorConfig,
+      ...additionalExecutors
+        .filter((e) => e.executor !== executorConfig.executor)
+        .map<ExecutorConfig>((e) => ({
+          executor: e.executor,
+          variant: e.variant ?? 'DEFAULT',
+        })),
+    ];
+    const multi = agentList.length > 1;
+
+    const baseRepos = repos.map((r) => ({
+      repo_id: r.id,
+      target_branch: targetBranches[r.id]!,
+    }));
+    const linkedIssueReq = linkedIssue
+      ? {
+          remote_project_id: linkedIssue.remoteProjectId,
+          issue_id: linkedIssue.issueId,
+        }
+      : null;
     const linkToIssue = linkedIssue
       ? {
           remoteProjectId: linkedIssue.remoteProjectId,
           issueId: linkedIssue.issueId,
         }
       : undefined;
+    const attachmentIds = getAttachmentIds();
 
-    const result = await createWorkspace.mutateAsync({
-      data,
-      linkToIssue,
-    });
+    setIsSubmitting(true);
+    let results: PromiseSettledResult<{ workspace: { id: string } }>[];
+    try {
+      results = await Promise.allSettled(
+        agentList.map((config) =>
+          createWorkspace.mutateAsync({
+            data: {
+              executor_config: config,
+              name: multi
+                ? `${title} (${toPrettyCase(config.executor)})`
+                : title,
+              prompt: message,
+              repos: baseRepos,
+              linked_issue: linkedIssueReq,
+              attachment_ids: attachmentIds,
+            },
+            linkToIssue,
+          })
+        )
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
 
-    if (result.workspace) {
-      onWorkspaceCreated(result.workspace.id);
+    const firstSuccess = results.find(
+      (r) => r.status === 'fulfilled' && !!r.value.workspace
+    );
+    const firstWorkspace =
+      firstSuccess?.status === 'fulfilled'
+        ? firstSuccess.value.workspace
+        : null;
+    const failed = results
+      .map((r, i) => (r.status === 'rejected' ? agentList[i]!.executor : null))
+      .filter((x): x is BaseCodingAgent => x !== null);
+
+    if (!firstWorkspace) {
+      // All N failed — stay on page and show aggregated error.
+      const messages = results
+        .map((r, i) => {
+          if (r.status !== 'rejected') return null;
+          const reason =
+            r.reason instanceof Error ? r.reason.message : String(r.reason);
+          return multi
+            ? `${toPrettyCase(agentList[i]!.executor)}: ${reason}`
+            : reason;
+        })
+        .filter((x): x is string => x !== null);
+      setSubmitError(
+        messages.length > 0
+          ? messages.join('\n')
+          : 'Failed to create workspace.'
+      );
+      return;
+    }
+
+    // Partial failure: we navigate away on first success, so a banner here
+    // would unmount before the user could read it. Log to console so it's
+    // discoverable in devtools at least.
+    if (failed.length > 0) {
+      console.warn(
+        `[create-workspace] Created ${results.length - failed.length}/${results.length}. Failed: ${failed.map(toPrettyCase).join(', ')}`
+      );
     }
 
     if (linkedIssue?.remoteProjectId) {
-      saveProjectRepoDefaults(linkedIssue.remoteProjectId, data.repos).catch(
+      saveProjectRepoDefaults(linkedIssue.remoteProjectId, baseRepos).catch(
         (err) => console.warn('Failed to save project repo defaults:', err)
       );
     }
 
     clearAttachments();
     await clearDraft();
+    onWorkspaceCreated(firstWorkspace.id);
   }, [
+    isSubmitting,
     canSubmit,
     executorConfig,
+    additionalExecutors,
     message,
     repos,
     targetBranches,
@@ -280,17 +387,16 @@ export function CreateChatBoxContainer({
     linkedIssue,
   ]);
 
-  // Determine error to display
+  // Determine error to display. submitError is the authoritative aggregated
+  // error from the last all-failed fan-out — we no longer read
+  // createWorkspace.error here because the single-mutation observer is racy
+  // under parallel mutateAsync.
   const displayError =
     hasAttemptedSubmit && repos.length === 0
       ? 'Add at least one repository to create a workspace'
       : hasAttemptedSubmit && !hasSelectedBranchesForAllRepos
         ? 'Select a branch for every repository before creating a workspace'
-        : createWorkspace.error
-          ? createWorkspace.error instanceof Error
-            ? createWorkspace.error.message
-            : 'Failed to create workspace'
-          : null;
+        : submitError;
 
   // Wait for initial value to be applied before rendering
   // This ensures the editor mounts with content ready, so autoFocus works correctly
@@ -359,12 +465,16 @@ export function CreateChatBoxContainer({
                     />
                   }
                   onSend={handleSubmit}
-                  isSending={createWorkspace.isPending}
+                  isSending={isSubmitting}
                   disabled={!hasSelectedRepos}
                   executor={{
                     selected: effectiveExecutor,
                     options: executorOptions,
                     onChange: handleExecutorChange,
+                    additionalSelected: additionalExecutors.map(
+                      (e) => e.executor
+                    ),
+                    onToggleAdditional: handleToggleAdditional,
                   }}
                   formatExecutorLabel={toPrettyCase}
                   error={displayError}

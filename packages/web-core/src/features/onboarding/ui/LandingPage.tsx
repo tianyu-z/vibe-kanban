@@ -39,6 +39,10 @@ import { getIdeName } from '@/shared/lib/ideName';
 import { cn, playSound } from '@/shared/lib/utils';
 import { isTauriApp } from '@/shared/lib/platform';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
+import {
+  readDefaultAdditionalExecutors,
+  saveDefaultAdditionalExecutors,
+} from '@/shared/lib/defaultAdditionalExecutors';
 import { PrimaryButton } from '@vibe/ui/components/PrimaryButton';
 
 type SoundOption = {
@@ -154,9 +158,13 @@ export function LandingPage() {
 
   const [initialized, setInitialized] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [selectedAgent, setSelectedAgent] = useState<BaseCodingAgent>(
-    BaseCodingAgent.CLAUDE_CODE
-  );
+  // Multi-select: first entry = primary (saved to config.executor_profile),
+  // remaining entries = default additional agents (saved to localStorage, read
+  // by useCreateModeState to pre-populate the Create-Workspace dropdown).
+  // Invariant: never empty (UI prevents deselecting the last one).
+  const [selectedAgents, setSelectedAgents] = useState<BaseCodingAgent[]>([
+    BaseCodingAgent.CLAUDE_CODE,
+  ]);
   const [editorType, setEditorType] = useState<EditorType>(EditorType.VS_CODE);
   const [customCommand, setCustomCommand] = useState('');
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -183,7 +191,11 @@ export function LandingPage() {
   useEffect(() => {
     if (!config || initialized) return;
 
-    setSelectedAgent(config.executor_profile.executor);
+    const primary = config.executor_profile.executor;
+    const stored = readDefaultAdditionalExecutors().filter(
+      (a) => a !== primary
+    );
+    setSelectedAgents([primary, ...stored]);
     setEditorType(config.editor.editor_type);
     setCustomCommand(config.editor.custom_command || '');
     setInitialized(true);
@@ -252,6 +264,17 @@ export function LandingPage() {
     void previewSound(value);
   };
 
+  // Toggle agent membership. Keeps at least one selected (the primary).
+  const toggleAgent = useCallback((agent: BaseCodingAgent) => {
+    setSelectedAgents((prev) => {
+      if (prev.includes(agent)) {
+        if (prev.length === 1) return prev; // can't deselect the last one
+        return prev.filter((a) => a !== agent);
+      }
+      return [...prev, agent];
+    });
+  }, []);
+
   const isCustomEditorValid =
     editorType !== EditorType.CUSTOM || customCommand.trim() !== '';
   const canContinue = !saving && isCustomEditorValid;
@@ -268,10 +291,14 @@ export function LandingPage() {
       auto_install_extension: true,
     };
 
+    const primaryAgent = selectedAgents[0] ?? BaseCodingAgent.CLAUDE_CODE;
+    const additionalAgents = selectedAgents.slice(1);
+
     trackRemoteOnboardingEvent(REMOTE_ONBOARDING_EVENTS.STAGE_SUBMITTED, {
       stage: 'landing',
       method: 'continue',
-      selected_agent: selectedAgent,
+      selected_agent: primaryAgent,
+      additional_agents: additionalAgents,
       editor_type: editorType,
       custom_editor_command_set:
         editorType === EditorType.CUSTOM && customCommand.trim() !== '',
@@ -279,12 +306,16 @@ export function LandingPage() {
       sound_file: soundEnabled ? soundFile : null,
     });
 
+    // Persist the additional defaults locally — Create Workspace reads this
+    // to seed its multi-select dropdown.
+    saveDefaultAdditionalExecutors(additionalAgents);
+
     setSaving(true);
     const success = await updateAndSaveConfig({
       onboarding_acknowledged: true,
       disclaimer_acknowledged: true,
       executor_profile: {
-        executor: selectedAgent,
+        executor: primaryAgent,
         variant: null,
       },
       editor: editorConfig,
@@ -381,15 +412,21 @@ export function LandingPage() {
             {/* Column 1: Coding Agent */}
             <section className="space-y-half">
               <h2 className="text-sm font-medium text-high">Coding Agent</h2>
+              <p className="text-xs text-low">
+                Pick one or more. The first selected is your primary default;
+                additional agents will be pre-selected on every new workspace so
+                the same prompt runs against all of them in parallel.
+              </p>
               <div className="grid gap-1.5">
                 {executorOptions.map((agent) => {
-                  const selected = selectedAgent === agent;
+                  const selected = selectedAgents.includes(agent);
+                  const isPrimary = selectedAgents[0] === agent;
 
                   return (
                     <button
                       key={agent}
                       type="button"
-                      onClick={() => setSelectedAgent(agent)}
+                      onClick={() => toggleAgent(agent)}
                       className={cn(
                         'flex items-center gap-base rounded-sm border px-base py-half text-left',
                         selected
@@ -404,6 +441,11 @@ export function LandingPage() {
                       <span className="text-sm text-normal flex-1 truncate">
                         {getAgentName(agent)}
                       </span>
+                      {isPrimary && (
+                        <span className="rounded-sm border border-brand px-half text-[10px] uppercase tracking-wide text-brand shrink-0">
+                          Primary
+                        </span>
+                      )}
                       {selected && (
                         <CheckIcon
                           className="size-icon-xs text-brand shrink-0"

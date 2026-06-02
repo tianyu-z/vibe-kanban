@@ -10,6 +10,7 @@ import type {
   DraftWorkspaceData,
   DraftWorkspaceAttachment,
   ExecutorConfig,
+  ExecutorProfileId,
   Repo,
 } from 'shared/types';
 import { ScratchType } from 'shared/types';
@@ -22,6 +23,7 @@ import { useDebouncedCallback } from '@/shared/hooks/useDebouncedCallback';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { useShape } from '@/shared/integrations/electric/hooks';
 import { repoApi } from '@/shared/lib/api';
+import { readDefaultAdditionalExecutors } from '@/shared/lib/defaultAdditionalExecutors';
 import { resolveCreateModeBootstrap } from '@/features/create-mode/model/createModeBootstrap';
 import { useWorkspaceCreateDefaults } from '@/shared/hooks/useWorkspaceCreateDefaults';
 import { getValidProjectRepoDefaults } from '@/shared/hooks/useProjectRepoDefaults';
@@ -49,6 +51,7 @@ interface DraftState {
   message: string;
   linkedIssue: LinkedIssue | null;
   executorConfig: ExecutorConfig | null;
+  additionalExecutors: ExecutorProfileId[];
   attachments: DraftWorkspaceAttachment[];
 }
 
@@ -72,6 +75,7 @@ type DraftAction =
       type: 'SET_EXECUTOR_CONFIG';
       config: ExecutorConfig | null;
     }
+  | { type: 'SET_ADDITIONAL_EXECUTORS'; executors: ExecutorProfileId[] }
   | { type: 'SET_ATTACHMENTS'; attachments: DraftWorkspaceAttachment[] };
 
 // ============================================================================
@@ -85,6 +89,7 @@ const draftInitialState: DraftState = {
   message: '',
   linkedIssue: null,
   executorConfig: null,
+  additionalExecutors: [],
   attachments: [],
 };
 
@@ -167,6 +172,19 @@ function draftReducer(state: DraftState, action: DraftAction): DraftState {
     case 'SET_EXECUTOR_CONFIG':
       return { ...state, executorConfig: action.config };
 
+    case 'SET_ADDITIONAL_EXECUTORS': {
+      // Normalize: dedup by executor. UI already prevents dupes, but we
+      // defend at the state boundary so a buggy caller can't create N
+      // workspaces for the same agent.
+      const seen = new Set<string>();
+      const deduped = action.executors.filter((e) => {
+        if (seen.has(e.executor)) return false;
+        seen.add(e.executor);
+        return true;
+      });
+      return { ...state, additionalExecutors: deduped };
+    }
+
     case 'SET_ATTACHMENTS':
       return { ...state, attachments: action.attachments };
 
@@ -233,6 +251,7 @@ interface UseCreateModeStateResult {
   hasInitialValue: boolean;
   linkedIssue: LinkedIssue | null;
   executorConfig: ExecutorConfig | null;
+  additionalExecutors: ExecutorProfileId[];
   setMessage: (message: string) => void;
   addRepo: (repo: Repo) => void;
   removeRepo: (repoId: string) => void;
@@ -241,6 +260,7 @@ interface UseCreateModeStateResult {
   clearDraft: () => Promise<void>;
   clearLinkedIssue: () => void;
   setExecutorConfig: (config: ExecutorConfig | null) => void;
+  setAdditionalExecutors: (executors: ExecutorProfileId[]) => void;
   attachments: DraftWorkspaceAttachment[];
   setAttachments: (attachments: DraftWorkspaceAttachment[]) => void;
 }
@@ -328,6 +348,37 @@ export function useCreateModeState({
     config?.executor_profile,
     scratch,
     isValidProfile,
+  ]);
+
+  // ============================================================================
+  // Seed additionalExecutors from the LandingPage localStorage preference once
+  // per fresh draft. Runs after init when the state slot is still empty (drafts
+  // don't persist additional agents — see useCreateMode.ts docstring).
+  // ============================================================================
+  const hasSeededAdditionalsRef = useRef(false);
+  useEffect(() => {
+    if (state.phase !== 'ready') return;
+    if (hasSeededAdditionalsRef.current) return;
+    if (state.additionalExecutors.length > 0) {
+      hasSeededAdditionalsRef.current = true;
+      return;
+    }
+    if (!profiles) return;
+
+    const primary = state.executorConfig?.executor;
+    const seed = readDefaultAdditionalExecutors()
+      .filter((e) => e !== primary && e in profiles)
+      .map((executor) => ({ executor, variant: null }));
+
+    if (seed.length > 0) {
+      dispatch({ type: 'SET_ADDITIONAL_EXECUTORS', executors: seed });
+    }
+    hasSeededAdditionalsRef.current = true;
+  }, [
+    state.phase,
+    state.additionalExecutors.length,
+    state.executorConfig,
+    profiles,
   ]);
 
   // ============================================================================
@@ -631,6 +682,13 @@ export function useCreateModeState({
     dispatch({ type: 'SET_EXECUTOR_CONFIG', config });
   }, []);
 
+  const setAdditionalExecutors = useCallback(
+    (executors: ExecutorProfileId[]) => {
+      dispatch({ type: 'SET_ADDITIONAL_EXECUTORS', executors });
+    },
+    []
+  );
+
   const setAttachments = useCallback(
     (attachments: DraftWorkspaceAttachment[]) => {
       dispatch({ type: 'SET_ATTACHMENTS', attachments });
@@ -648,6 +706,7 @@ export function useCreateModeState({
     hasInitialValue: state.phase === 'ready',
     linkedIssue: state.linkedIssue,
     executorConfig: state.executorConfig,
+    additionalExecutors: state.additionalExecutors,
     setMessage,
     addRepo,
     removeRepo,
@@ -656,6 +715,7 @@ export function useCreateModeState({
     clearDraft,
     clearLinkedIssue,
     setExecutorConfig,
+    setAdditionalExecutors,
     attachments: state.attachments,
     setAttachments,
   };

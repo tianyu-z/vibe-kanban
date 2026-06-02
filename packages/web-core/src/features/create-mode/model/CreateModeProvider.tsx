@@ -65,6 +65,8 @@ export function CreateModeProvider({
       clearLinkedIssue: state.clearLinkedIssue,
       executorConfig: state.executorConfig,
       setExecutorConfig: state.setExecutorConfig,
+      additionalExecutors: state.additionalExecutors,
+      setAdditionalExecutors: state.setAdditionalExecutors,
       attachments: state.attachments,
       setAttachments: state.setAttachments,
     }),
@@ -85,6 +87,8 @@ export function CreateModeProvider({
       state.clearLinkedIssue,
       state.executorConfig,
       state.setExecutorConfig,
+      state.additionalExecutors,
+      state.setAdditionalExecutors,
       state.attachments,
       state.setAttachments,
     ]
