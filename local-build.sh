@@ -64,21 +64,41 @@ cargo build --release --manifest-path Cargo.toml \
 
 echo "📦 Creating distribution package..."
 
+# Portable single-file zip: use the `zip` binary when present, else fall back to
+# python3 (always available on HPC login nodes; `zip` often is not). The npx CLI
+# extracts with adm-zip and chmod 0755s the binary afterwards, so the archived
+# unix mode does not matter.
+zip_one() { # zip_one <archive.zip> <file>
+  if command -v zip >/dev/null 2>&1; then
+    zip -q "$1" "$2"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$1" "$2" <<'PY'
+import os, sys, zipfile
+archive, path = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
+    z.write(path, os.path.basename(path))
+PY
+  else
+    echo "Error: need either 'zip' or 'python3' to package binaries" >&2
+    exit 1
+  fi
+}
+
 # Copy the main binary
 cp ${CARGO_TARGET_DIR}/release/server vibe-kanban
-zip -q vibe-kanban.zip vibe-kanban
-rm -f vibe-kanban 
+zip_one vibe-kanban.zip vibe-kanban
+rm -f vibe-kanban
 mv vibe-kanban.zip npx-cli/dist/$PLATFORM/vibe-kanban.zip
 
 # Copy the MCP binary
 cp ${CARGO_TARGET_DIR}/release/vibe-kanban-mcp vibe-kanban-mcp
-zip -q vibe-kanban-mcp.zip vibe-kanban-mcp
+zip_one vibe-kanban-mcp.zip vibe-kanban-mcp
 rm -f vibe-kanban-mcp
 mv vibe-kanban-mcp.zip npx-cli/dist/$PLATFORM/vibe-kanban-mcp.zip
 
 # Copy the Review CLI binary
 cp ${CARGO_TARGET_DIR}/release/review vibe-kanban-review
-zip -q vibe-kanban-review.zip vibe-kanban-review
+zip_one vibe-kanban-review.zip vibe-kanban-review
 rm -f vibe-kanban-review
 mv vibe-kanban-review.zip npx-cli/dist/$PLATFORM/vibe-kanban-review.zip
 
